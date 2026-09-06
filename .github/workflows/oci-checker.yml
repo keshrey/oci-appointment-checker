@@ -28,6 +28,8 @@ jobs:
 
       - name: Run OCI slot checker
         id: checker
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python3 oci_checker.py
         continue-on-error: true   # don't fail the job yet — we check exit code below
 
@@ -41,21 +43,8 @@ jobs:
             echo "❌ No slots available." >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ── Notification via ntfy.sh (free, no account needed) ────────────────
-      # Setup: pick any unique topic name (e.g. "oci-berlin-yash-4827"),
-      # add it as repo secret NTFY_TOPIC (Settings → Secrets → Actions),
-      # then subscribe at https://ntfy.sh/<your-topic> or in the ntfy app.
-      - name: Send push notification (slots found)
-        if: steps.checker.outcome == 'failure' && env.NTFY_TOPIC != ''
-        env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: |
-          curl -s \
-            -H "Title: OCI Slot Available in Berlin!" \
-            -H "Priority: urgent" \
-            -H "Tags: tada,calendar" \
-            -d "Fresh OCI appointment slot(s) opened. Book now at https://appointment.indianembassyberlin.gov.in" \
-            "https://ntfy.sh/$NTFY_TOPIC"
+      # Notification is sent by oci_checker.py itself (via NTFY_TOPIC env var above)
+      # with the exact available dates included in the message.
 
       # ── Fail the job if the script errored (exit 2) ───────────────────────
       # exit 1 = slots found (good news, don't fail)

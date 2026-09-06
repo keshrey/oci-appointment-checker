@@ -13,9 +13,11 @@ Usage:
     python3 oci_checker.py --visible # visible browser window
 """
 
+import os
 import sys
 import time
 import datetime
+import urllib.request
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -143,6 +145,30 @@ def summarise_month(driver) -> tuple[str, list[str], int, int]:
     return label, available, len(booked), len(all_td)
 
 
+def notify(available_dates: list[str]):
+    """Send a push notification via ntfy.sh with the available dates."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not topic:
+        return
+    dates_str = "\n".join(f"• {d}" for d in available_dates)
+    message = f"Fresh OCI slots open in Berlin!\n\n{dates_str}\n\nBook at: {BASE_URL}"
+    try:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=message.encode("utf-8"),
+            headers={
+                "Title": f"OCI Slot Available! ({len(available_dates)} date(s))",
+                "Priority": "urgent",
+                "Tags": "tada,calendar",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print(f"  Notification sent to ntfy topic '{topic}'")
+    except Exception as e:
+        print(f"  Notification failed: {e}")
+
+
 def run_check(visible: bool = False):
     print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Starting OCI slot check…")
     driver = build_driver(visible)
@@ -222,6 +248,7 @@ def run_check(visible: bool = False):
             for d in all_available:
                 print(f"  • {d}")
             print(f"\nBook at: {BASE_URL}")
+            notify(all_available)
         else:
             print("No available OCI appointment slots found in the next "
                   f"{MONTHS_TO_CHECK} months.")
