@@ -55,7 +55,7 @@ NEXT_MONTH_BTN      = "#ui-datepicker-div .ui-datepicker-next"
 MONTH_YEAR_LABEL    = "#ui-datepicker-div .ui-datepicker-title"
 # ─────────────────────────────────────────────────────────────────────────────
 
-MONTHS_TO_CHECK = 3   # how many calendar months to scan
+MONTHS_TO_CHECK = 5   # how many calendar months to scan
 
 
 def build_driver(visible: bool) -> webdriver.Chrome:
