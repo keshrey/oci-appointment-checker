@@ -1,0 +1,69 @@
+name: OCI Appointment Checker
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 minutes
+  workflow_dispatch:          # allow manual runs from GitHub UI
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ubuntu-latest has Google Chrome pre-installed.
+      # webdriver-manager downloads the matching ChromeDriver automatically.
+
+      - name: Run OCI slot checker
+        id: checker
+        run: python3 oci_checker.py
+        continue-on-error: true   # don't fail the job yet — we check exit code below
+
+      - name: Write job summary
+        run: |
+          echo "## OCI Checker — $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.checker.outcome }}" = "failure" ]; then
+            echo "### ✅ SLOTS AVAILABLE — book now!" >> $GITHUB_STEP_SUMMARY
+            echo "👉 https://appointment.indianembassyberlin.gov.in" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ No slots available." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ── Notification via ntfy.sh (free, no account needed) ────────────────
+      # Setup: pick any unique topic name (e.g. "oci-berlin-yash-4827"),
+      # add it as repo secret NTFY_TOPIC (Settings → Secrets → Actions),
+      # then subscribe at https://ntfy.sh/<your-topic> or in the ntfy app.
+      - name: Send push notification (slots found)
+        if: steps.checker.outcome == 'failure' && env.NTFY_TOPIC != ''
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -s \
+            -H "Title: OCI Slot Available in Berlin!" \
+            -H "Priority: urgent" \
+            -H "Tags: tada,calendar" \
+            -d "Fresh OCI appointment slot(s) opened. Book now at https://appointment.indianembassyberlin.gov.in" \
+            "https://ntfy.sh/$NTFY_TOPIC"
+
+      # ── Fail the job if the script errored (exit 2) ───────────────────────
+      # exit 1 = slots found (good news, don't fail)
+      # exit 2 = script error (fail so GitHub emails you)
+      - name: Propagate script errors
+        if: steps.checker.outputs.exit-code == '2' || (steps.checker.outcome == 'failure' && steps.checker.conclusion == 'failure')
+        run: |
+          if [ "${{ steps.checker.outcome }}" = "failure" ]; then
+            # exit 1 means slots found — that's success for us
+            echo "Slots found — not a failure."
+          fi
