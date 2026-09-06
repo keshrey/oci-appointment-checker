@@ -237,9 +237,8 @@ def run_check(visible: bool = False):
                     )
                     next_btn.click()
                     time.sleep(0.8)
-                except Exception as e:
-                    print(f"    Could not navigate to next month: {e}")
-                    break
+                except Exception:
+                    break  # no more months available
 
         # ── Summary ───────────────────────────────────────────────────────
         print(f"\n{'='*50}")
