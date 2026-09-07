@@ -2,7 +2,7 @@ name: OCI Appointment Checker
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # every 15 minutes
+    - cron: '*/10 * * * *'   # every 10 minutes
   workflow_dispatch:          # allow manual runs from GitHub UI
 
 jobs:
@@ -30,6 +30,7 @@ jobs:
         id: checker
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          CUTOFF_DATE: ${{ vars.CUTOFF_DATE }}
         run: python3 oci_checker.py
         continue-on-error: true   # don't fail the job yet — we check exit code below
 

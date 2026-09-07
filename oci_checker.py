@@ -55,7 +55,16 @@ NEXT_MONTH_BTN      = "#ui-datepicker-div .ui-datepicker-next"
 MONTH_YEAR_LABEL    = "#ui-datepicker-div .ui-datepicker-title"
 # ─────────────────────────────────────────────────────────────────────────────
 
-MONTHS_TO_CHECK = 3   # how many calendar months to scan (Sep, Oct, Nov)
+MONTHS_TO_CHECK = 5   # max months to scan — stops early if CUTOFF_DATE is reached
+
+# Set CUTOFF_DATE env var (YYYY-MM-DD) to only alert for slots before that date.
+# Configurable via GitHub Actions Variables without any code change.
+_cutoff_str = os.environ.get("CUTOFF_DATE", "").strip()
+try:
+    CUTOFF_DATE = datetime.date.fromisoformat(_cutoff_str) if _cutoff_str else None
+except ValueError:
+    print(f"WARNING: Invalid CUTOFF_DATE '{_cutoff_str}', ignoring.")
+    CUTOFF_DATE = None
 
 
 def build_driver(visible: bool) -> webdriver.Chrome:
@@ -90,14 +99,24 @@ def agree_and_proceed(driver, wait):
 
 
 def get_available_dates(driver, month_label: str) -> list[str]:
-    """Return list of available date strings in the currently shown month."""
+    """Return list of available date strings in the currently shown month,
+    filtered to only include dates before CUTOFF_DATE if set."""
     available = []
-    # Each available cell has an <a> link inside
     cells = driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS)
     for cell in cells:
         day = cell.text.strip()
-        if day:
-            available.append(f"{month_label} {day}")
+        if not day:
+            continue
+        if CUTOFF_DATE:
+            try:
+                cell_date = datetime.datetime.strptime(
+                    f"{month_label} {day}", "%B %Y %d"
+                ).date()
+                if cell_date >= CUTOFF_DATE:
+                    continue  # skip — not earlier than current appointment
+            except ValueError:
+                pass
+        available.append(f"{month_label} {day}")
     return available
 
 
@@ -217,6 +236,19 @@ def run_check(visible: bool = False):
 
         for month_idx in range(MONTHS_TO_CHECK):
             label, avail, booked_cnt, total_cnt = summarise_month(driver)
+
+            # Stop if this entire month is on/after the cutoff date
+            if CUTOFF_DATE:
+                try:
+                    month_start = datetime.datetime.strptime(
+                        f"{label} 1", "%B %Y %d"
+                    ).date()
+                    if month_start >= CUTOFF_DATE:
+                        print(f"\n  Stopping at {label} — on/after cutoff {CUTOFF_DATE}")
+                        break
+                except ValueError:
+                    pass
+
             print(f"\n  Month: {label}")
             print(f"    Total working days: {total_cnt - booked_cnt} "
                   f"(booked={booked_cnt}, total cells={total_cnt})")
@@ -249,8 +281,8 @@ def run_check(visible: bool = False):
             print(f"\nBook at: {BASE_URL}")
             notify(all_available)
         else:
-            print("No available OCI appointment slots found in the next "
-                  f"{MONTHS_TO_CHECK} months.")
+            cutoff_info = f" before {CUTOFF_DATE}" if CUTOFF_DATE else ""
+            print(f"No available OCI appointment slots found{cutoff_info}.")
         print(f"{'='*50}")
 
         if visible:
