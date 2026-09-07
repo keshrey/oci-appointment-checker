@@ -170,7 +170,8 @@ def notify(available_dates: list[str]):
     if not topic:
         return
     dates_str = "\n".join(f"• {d}" for d in available_dates)
-    message = f"Fresh OCI slots open in Berlin!\n\n{dates_str}\n\nBook at: {BASE_URL}"
+    cutoff_line = f"Earlier than your appointment on {CUTOFF_DATE}\n\n" if CUTOFF_DATE else ""
+    message = f"Fresh OCI slots open in Berlin!\n\n{cutoff_line}{dates_str}\n\nBook at: {BASE_URL}"
     try:
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
