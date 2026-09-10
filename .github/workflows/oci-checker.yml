@@ -2,7 +2,7 @@ name: OCI Appointment Checker
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes
+    - cron: '*/10 * * * *'   # every 10 minutes (triggered reliably via cron-job.org)
   workflow_dispatch:          # allow manual runs from GitHub UI
 
 jobs:
@@ -23,37 +23,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ubuntu-latest has Google Chrome pre-installed.
-      # webdriver-manager downloads the matching ChromeDriver automatically.
-
       - name: Run OCI slot checker
         id: checker
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           CUTOFF_DATE: ${{ vars.CUTOFF_DATE }}
-        run: python3 oci_checker.py
-        continue-on-error: true   # don't fail the job yet — we check exit code below
+        run: |
+          python3 oci_checker.py
+          EXIT=$?
+          echo "exit_code=$EXIT" >> $GITHUB_OUTPUT
+          # exit 0 = no slots, exit 1 = slots found — both are not errors
+          # exit 2 = real script error — propagate so job turns red
+          if [ $EXIT -eq 2 ]; then exit 2; fi
+          exit 0
 
       - name: Write job summary
+        if: always()
         run: |
           echo "## OCI Checker — $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.checker.outcome }}" = "failure" ]; then
+          CODE="${{ steps.checker.outputs.exit_code }}"
+          if [ "$CODE" = "1" ]; then
             echo "### ✅ SLOTS AVAILABLE — book now!" >> $GITHUB_STEP_SUMMARY
             echo "👉 https://appointment.indianembassyberlin.gov.in" >> $GITHUB_STEP_SUMMARY
+          elif [ "$CODE" = "2" ]; then
+            echo "### ❌ Script error — check the logs." >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ No slots available." >> $GITHUB_STEP_SUMMARY
-          fi
-
-      # Notification is sent by oci_checker.py itself (via NTFY_TOPIC env var above)
-      # with the exact available dates included in the message.
-
-      # ── Fail the job if the script errored (exit 2) ───────────────────────
-      # exit 1 = slots found (good news, don't fail)
-      # exit 2 = script error (fail so GitHub emails you)
-      - name: Propagate script errors
-        if: steps.checker.outputs.exit-code == '2' || (steps.checker.outcome == 'failure' && steps.checker.conclusion == 'failure')
-        run: |
-          if [ "${{ steps.checker.outcome }}" = "failure" ]; then
-            # exit 1 means slots found — that's success for us
-            echo "Slots found — not a failure."
+            echo "### No slots available." >> $GITHUB_STEP_SUMMARY
           fi
