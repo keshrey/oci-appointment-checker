@@ -1,9 +1,7 @@
 name: OCI Appointment Checker
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes (triggered reliably via cron-job.org)
-  workflow_dispatch:          # allow manual runs from GitHub UI
+  workflow_dispatch:          # triggered by cron-job.org every 10 minutes
 
 jobs:
   check-slots:
