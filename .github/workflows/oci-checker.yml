@@ -47,6 +47,15 @@ jobs:
           if [ $EXIT -eq 2 ]; then exit 2; fi
           exit 0
 
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-screenshot-${{ github.run_number }}
+          path: /tmp/oci_screenshots/run_summary.png
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Write job summary
         if: always()
         run: |

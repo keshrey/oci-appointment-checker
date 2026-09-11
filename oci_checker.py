@@ -23,6 +23,7 @@ import time
 import datetime
 import urllib.request
 import urllib.parse
+import pathlib
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -89,6 +90,42 @@ PERSONAL = {
     "address":      os.environ.get("ADDRESS", ""),
 }
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+SCREENSHOT_DIR = pathlib.Path("/tmp/oci_screenshots")
+_shot_index = 0
+
+def screenshot(driver, label: str):
+    global _shot_index
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    path = SCREENSHOT_DIR / f"{_shot_index:02d}_{label}.png"
+    driver.save_screenshot(str(path))
+    _shot_index += 1
+    print(f"  [screenshot] {path.name}")
+
+
+def stitch_screenshots() -> pathlib.Path | None:
+    """Combine all screenshots in SCREENSHOT_DIR into one tall PNG."""
+    try:
+        from PIL import Image
+        images = sorted(SCREENSHOT_DIR.glob("*.png"))
+        if not images:
+            return None
+        imgs = [Image.open(p) for p in images]
+        max_w = max(i.width for i in imgs)
+        total_h = sum(i.height for i in imgs)
+        combined = Image.new("RGB", (max_w, total_h), (255, 255, 255))
+        y = 0
+        for img in imgs:
+            combined.paste(img, (0, y))
+            y += img.height
+        out = SCREENSHOT_DIR / "run_summary.png"
+        combined.save(str(out))
+        print(f"  Combined screenshot: {out}")
+        return out
+    except Exception as e:
+        print(f"  Could not stitch screenshots: {e}")
+        return None
 
 
 def build_driver(visible: bool) -> webdriver.Chrome:
@@ -390,10 +427,12 @@ def run_check(visible: bool = False):
         driver.get(BASE_URL)
         wait.until(EC.presence_of_element_located(AGREE_CHECKBOX))
         print("  Page 1 — agreeing and proceeding…")
+        screenshot(driver, "page1_agree")
         agree_and_proceed(driver, wait)
 
         wait.until(EC.presence_of_element_located(JURISDICTION_SELECT))
         print("  Page 2 — selecting Berlin…")
+        screenshot(driver, "page2_jurisdiction")
         Select(driver.find_element(*JURISDICTION_SELECT)).select_by_value(BERLIN_VALUE)
         time.sleep(0.5)
         agree_and_proceed(driver, wait)
@@ -407,6 +446,7 @@ def run_check(visible: bool = False):
         print("  Selecting Fresh OCI…")
         Select(driver.find_element(*SERVICE_SELECT)).select_by_value(FRESH_OCI_VALUE)
         time.sleep(0.5)
+        screenshot(driver, "page3_service_selected")
 
         # ── Open datepicker and scan months ──────────────────────────────────
         print("  Opening datepicker…")
@@ -434,6 +474,7 @@ def run_check(visible: bool = False):
             total_cnt  = len(driver.find_elements(By.CSS_SELECTOR, ALL_CELLS))
 
             print(f"\n  Month: {label}  (booked={booked_cnt}, total={total_cnt})")
+            screenshot(driver, f"calendar_{label.replace(' ', '_')}")
             if slots:
                 print(f"    AVAILABLE ({len(slots)}):")
                 for ds, dt in slots:
@@ -488,6 +529,7 @@ def run_check(visible: bool = False):
                 time.sleep(0.3)
 
                 outcome = attempt_auto_book(driver, wait, best_date, best_display)
+                screenshot(driver, "after_booking_attempt")
                 booking_outcome = outcome
 
                 if outcome == "success":
@@ -539,8 +581,10 @@ def run_check(visible: bool = False):
         print(f"\nERROR: {e}")
         import traceback
         traceback.print_exc()
+        screenshot(driver, "error_state")
         return None
     finally:
+        stitch_screenshots()
         driver.quit()
 
 
