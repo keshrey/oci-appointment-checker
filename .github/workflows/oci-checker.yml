@@ -26,8 +26,17 @@ jobs:
       - name: Run OCI slot checker
         id: checker
         env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          CUTOFF_DATE: ${{ vars.CUTOFF_DATE }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          CUTOFF_DATE:       ${{ vars.CUTOFF_DATE }}
+          CANCEL_COUNT:      ${{ vars.CANCEL_COUNT }}
+          APP_REF_NO:        ${{ secrets.APP_REF_NO }}
+          PASSPORT_NUMBER:   ${{ secrets.PASSPORT_NUMBER }}
+          FIRST_NAME:        ${{ secrets.FIRST_NAME }}
+          LAST_NAME:         ${{ secrets.LAST_NAME }}
+          DATE_OF_BIRTH:     ${{ secrets.DATE_OF_BIRTH }}
+          MOBILE_NUMBER:     ${{ secrets.MOBILE_NUMBER }}
+          EMAIL:             ${{ secrets.EMAIL }}
+          NATIONALITY_VALUE: ${{ secrets.NATIONALITY_VALUE }}
         run: |
           python3 oci_checker.py
           EXIT=$?

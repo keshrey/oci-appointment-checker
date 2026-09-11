@@ -1,16 +1,20 @@
 """
-OCI Appointment Checker — Embassy of India, Berlin
-Checks https://appointment.indianembassyberlin.gov.in for available Fresh OCI slots.
+OCI Appointment Checker & Auto-Booker — Embassy of India, Berlin
 
 Flow (verified against the live site):
   Page 1 (/):                    agree checkbox + PROCEED
   Page 2 (/applicationscountry): select Jurisdiction=Berlin + agree + PROCEED
-  Page 3 (/application):         select Service=OCI, SubType=Fresh OCI,
-                                 click date picker, read available dates
+  Page 3 (/application):         select OCI, Fresh OCI, scan datepicker
+
+Auto-booking logic:
+  - Slot within AUTO_BOOK_DAYS  → attempt to book automatically
+  - Slot beyond AUTO_BOOK_DAYS  → send notification only
+  - CANCEL_COUNT >= 2           → notification only (never risk passport block)
+  - Already has appointment     → notify user to cancel manually first
 
 Usage:
-    python3 oci_checker.py           # headless mode (default)
-    python3 oci_checker.py --visible # visible browser window
+    python3 oci_checker.py           # headless
+    python3 oci_checker.py --visible # visible browser
 """
 
 import os
@@ -18,6 +22,7 @@ import sys
 import time
 import datetime
 import urllib.request
+import urllib.parse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -25,46 +30,62 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
 
 BASE_URL = "https://appointment.indianembassyberlin.gov.in"
 
-# ── Selectors (verified on 2026-09-06) ──────────────────────────────────────
-# Page 1 & 2
+# ── Selectors ────────────────────────────────────────────────────────────────
 AGREE_CHECKBOX      = (By.ID, "agree")
 PROCEED_BUTTON      = (By.ID, "btnSubmit")
-
-# Page 2
-JURISDICTION_SELECT = (By.ID, "dropdown")   # name='state'
-BERLIN_VALUE        = "Hesse"               # text='Berlin'
-
-# Page 3 (/application)
-CATEGORY_SELECT     = (By.ID, "category")   # name='category'
-OCI_CATEGORY_VALUE  = "1"                   # text='OCI Services'
-SERVICE_SELECT      = (By.ID, "service")    # name='service', loaded dynamically
-FRESH_OCI_VALUE     = "20"                  # text='Fresh OCI'
-DATE_INPUT          = (By.ID, "appmnt_date")  # jQuery UI datepicker, name='appmnt_date'
-
-# Calendar — jQuery UI datepicker
+JURISDICTION_SELECT = (By.ID, "dropdown")
+BERLIN_VALUE        = "Hesse"
+CATEGORY_SELECT     = (By.ID, "category")
+OCI_CATEGORY_VALUE  = "1"
+SERVICE_SELECT      = (By.ID, "service")
+FRESH_OCI_VALUE     = "20"
+DATE_INPUT          = (By.ID, "appmnt_date")
+NATIONALITY_SELECT  = (By.ID, "nationality")
 CALENDAR_DIV        = "#ui-datepicker-div"
-# Available: td cells that CAN be clicked (have an <a> inside, not unselectable)
 AVAILABLE_CELLS     = "#ui-datepicker-div td:not(.ui-datepicker-unselectable):not(.ui-datepicker-other-month) a"
 BOOKED_CELLS        = "#ui-datepicker-div td.booked-dates"
 ALL_CELLS           = "#ui-datepicker-div td:not(.ui-datepicker-other-month)"
 NEXT_MONTH_BTN      = "#ui-datepicker-div .ui-datepicker-next"
-MONTH_YEAR_LABEL    = "#ui-datepicker-div .ui-datepicker-title"
+BOOK_BUTTON         = (By.ID, "btnSubmitReq")
+CAPTCHA_ANSWER      = (By.ID, "txtCaptcha")
+CAPTCHA_INPUT       = (By.ID, "CaptchaInput")
 # ─────────────────────────────────────────────────────────────────────────────
 
-MONTHS_TO_CHECK = 5   # max months to scan — stops early if CUTOFF_DATE is reached
+MONTHS_TO_CHECK   = 5
+AUTO_BOOK_DAYS    = 30   # auto-book if slot is within this many days from today
 
-# Set CUTOFF_DATE env var (YYYY-MM-DD) to only alert for slots before that date.
-# Configurable via GitHub Actions Variables without any code change.
+MONTH_NAMES = ["January","February","March","April","May","June",
+               "July","August","September","October","November","December"]
+
+# ── Config from environment ──────────────────────────────────────────────────
 _cutoff_str = os.environ.get("CUTOFF_DATE", "").strip()
 try:
     CUTOFF_DATE = datetime.date.fromisoformat(_cutoff_str) if _cutoff_str else None
 except ValueError:
     print(f"WARNING: Invalid CUTOFF_DATE '{_cutoff_str}', ignoring.")
     CUTOFF_DATE = None
+
+try:
+    CANCEL_COUNT = int(os.environ.get("CANCEL_COUNT", "0"))
+except ValueError:
+    CANCEL_COUNT = 0
+
+PERSONAL = {
+    "app_ref_no":   os.environ.get("APP_REF_NO", ""),
+    "passport":     os.environ.get("PASSPORT_NUMBER", ""),
+    "first_name":   os.environ.get("FIRST_NAME", ""),
+    "last_name":    os.environ.get("LAST_NAME", ""),
+    "dob":          os.environ.get("DATE_OF_BIRTH", ""),
+    "mobile":       os.environ.get("MOBILE_NUMBER", ""),
+    "email":        os.environ.get("EMAIL", ""),
+    "nationality":  os.environ.get("NATIONALITY_VALUE", ""),
+}
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def build_driver(visible: bool) -> webdriver.Chrome:
@@ -84,50 +105,20 @@ def build_driver(visible: bool) -> webdriver.Chrome:
 
 
 def agree_and_proceed(driver, wait):
-    """Check #agree if present + click #btnSubmit (waiting for it to be enabled)."""
     try:
         chk = wait.until(EC.presence_of_element_located(AGREE_CHECKBOX))
         if not chk.is_selected():
             chk.click()
         time.sleep(0.3)
     except Exception:
-        pass  # checkbox not always present
-
+        pass
     btn = wait.until(EC.element_to_be_clickable(PROCEED_BUTTON))
     btn.click()
     time.sleep(2)
 
 
-def get_available_dates(driver, month_label: str) -> list[str]:
-    """Return list of available date strings in the currently shown month,
-    filtered to only include dates before CUTOFF_DATE if set."""
-    available = []
-    cells = driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS)
-    for cell in cells:
-        day = cell.text.strip()
-        if not day:
-            continue
-        if CUTOFF_DATE:
-            try:
-                cell_date = datetime.datetime.strptime(
-                    f"{month_label} {day}", "%B %Y %d"
-                ).date()
-                if cell_date >= CUTOFF_DATE:
-                    continue  # skip — not earlier than current appointment
-            except ValueError:
-                pass
-        available.append(f"{month_label} {day}")
-    return available
-
-
-MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
-               "July", "August", "September", "October", "November", "December"]
-
-
 def get_month_label(driver) -> str:
-    """Extract 'Month YYYY' from the jQuery UI datepicker header."""
     try:
-        # When the datepicker uses <select> dropdowns for month/year
         m_sel = driver.find_elements(By.CSS_SELECTOR,
                                      "#ui-datepicker-div select.ui-datepicker-month")
         y_sel = driver.find_elements(By.CSS_SELECTOR,
@@ -136,167 +127,393 @@ def get_month_label(driver) -> str:
             month_val = int(Select(m_sel[0]).first_selected_option.get_attribute("value"))
             year_val  = Select(y_sel[0]).first_selected_option.get_attribute("value")
             return f"{MONTH_NAMES[month_val]} {year_val}"
-
-        # When the datepicker shows plain text spans
-        m_span = driver.find_elements(By.CSS_SELECTOR,
-                                      "#ui-datepicker-div .ui-datepicker-month")
-        y_span = driver.find_elements(By.CSS_SELECTOR,
-                                      "#ui-datepicker-div .ui-datepicker-year")
+        m_span = driver.find_elements(By.CSS_SELECTOR, "#ui-datepicker-div .ui-datepicker-month")
+        y_span = driver.find_elements(By.CSS_SELECTOR, "#ui-datepicker-div .ui-datepicker-year")
         if m_span and y_span:
             return f"{m_span[0].text.strip()} {y_span[0].text.strip()}"
-
-        # Fallback: title text first line
-        title = driver.find_element(By.CSS_SELECTOR,
-                                    "#ui-datepicker-div .ui-datepicker-title")
+        title = driver.find_element(By.CSS_SELECTOR, "#ui-datepicker-div .ui-datepicker-title")
         return title.text.split("\n")[0].strip()
     except Exception:
         return "Unknown month"
 
 
-def summarise_month(driver) -> tuple[str, list[str], int, int]:
-    """Return (month_label, available_dates, booked_count, total_count)."""
-    label = get_month_label(driver)
-
-    available = get_available_dates(driver, label)
-
-    booked  = driver.find_elements(By.CSS_SELECTOR, BOOKED_CELLS)
-    all_td  = driver.find_elements(By.CSS_SELECTOR, ALL_CELLS)
-    return label, available, len(booked), len(all_td)
+def parse_slot_date(month_label: str, day: str) -> datetime.date | None:
+    try:
+        return datetime.datetime.strptime(f"{month_label} {day}", "%B %Y %d").date()
+    except ValueError:
+        return None
 
 
-def notify(available_dates: list[str]):
-    """Send a push notification via ntfy.sh with the available dates."""
+def get_available_dates(driver, month_label: str) -> list[tuple[str, datetime.date]]:
+    """Return list of (display_str, date) for available slots, filtered by CUTOFF_DATE."""
+    available = []
+    for cell in driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS):
+        day = cell.text.strip()
+        if not day:
+            continue
+        slot_date = parse_slot_date(month_label, day)
+        if slot_date is None:
+            continue
+        if CUTOFF_DATE and slot_date >= CUTOFF_DATE:
+            continue
+        available.append((f"{month_label} {day}", slot_date))
+    return available
+
+
+def is_within_auto_book_window(slot_date: datetime.date) -> bool:
+    return slot_date <= datetime.date.today() + datetime.timedelta(days=AUTO_BOOK_DAYS)
+
+
+def notify(title: str, message: str, priority: str = "urgent"):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic:
         return
-    dates_str = "\n".join(f"• {d}" for d in available_dates)
-    cutoff_line = f"Earlier than your appointment on {CUTOFF_DATE}\n\n" if CUTOFF_DATE else ""
-    message = f"Fresh OCI slots open in Berlin!\n\n{cutoff_line}{dates_str}\n\nBook at: {BASE_URL}"
     try:
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
-            headers={
-                "Title": f"OCI Slot Available! ({len(available_dates)} date(s))",
-                "Priority": "urgent",
-                "Tags": "tada,calendar",
-            },
+            headers={"Title": title, "Priority": priority, "Tags": "tada,calendar"},
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
-        print(f"  Notification sent to ntfy topic '{topic}'")
+        print(f"  Notification sent: {title}")
     except Exception as e:
         print(f"  Notification failed: {e}")
 
 
+# ── Auto-booking ─────────────────────────────────────────────────────────────
+
+def navigate_datepicker_to_month(driver, wait, target_date: datetime.date) -> bool:
+    """Navigate the open datepicker to the month containing target_date."""
+    for _ in range(12):
+        label = get_month_label(driver)
+        try:
+            month_start = datetime.datetime.strptime(f"{label} 1", "%B %Y %d").date()
+            if month_start.year == target_date.year and month_start.month == target_date.month:
+                return True
+            if month_start > target_date:
+                return False
+        except ValueError:
+            return False
+        try:
+            next_btn = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, NEXT_MONTH_BTN)))
+            next_btn.click()
+            time.sleep(0.5)
+        except Exception:
+            return False
+    return False
+
+
+def select_date_in_picker(driver, wait, target_date: datetime.date) -> bool:
+    """Open datepicker, navigate to month, click the day. Returns True on success."""
+    date_inp = wait.until(EC.element_to_be_clickable(DATE_INPUT))
+    date_inp.click()
+    wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
+    time.sleep(0.5)
+
+    if not navigate_datepicker_to_month(driver, wait, target_date):
+        print(f"  Could not navigate datepicker to {target_date}")
+        return False
+
+    day_str = str(target_date.day)
+    for cell in driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS):
+        if cell.text.strip() == day_str:
+            cell.click()
+            time.sleep(0.5)
+            return True
+
+    print(f"  Day {day_str} not found / no longer available in datepicker")
+    return False
+
+
+def fill_form_fields(driver, wait):
+    """Fill all personal detail fields."""
+    def set_field(field_id, value):
+        if not value:
+            return
+        el = driver.find_element(By.ID, field_id)
+        el.clear()
+        el.send_keys(value)
+        time.sleep(0.1)
+
+    set_field("app_ref_no",     PERSONAL["app_ref_no"])
+    set_field("passport_number", PERSONAL["passport"])
+    set_field("firstname",       PERSONAL["first_name"])
+    set_field("secondname",      PERSONAL["last_name"])
+    set_field("mobile_number",   PERSONAL["mobile"])
+    set_field("email",           PERSONAL["email"])
+
+    # DOB — jQuery datepicker field; set via JS then trigger change
+    if PERSONAL["dob"]:
+        driver.execute_script(
+            "var el = document.getElementById('date_of_birth');"
+            "el.value = arguments[0];"
+            "$(el).trigger('change');",
+            PERSONAL["dob"]
+        )
+        time.sleep(0.2)
+
+    # Nationality
+    if PERSONAL["nationality"]:
+        try:
+            Select(driver.find_element(*NATIONALITY_SELECT)).select_by_value(
+                PERSONAL["nationality"])
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"  Warning: could not set nationality: {e}")
+
+    # Captcha — answer is in hidden field #txtCaptcha
+    captcha_val = driver.find_element(*CAPTCHA_ANSWER).get_attribute("value")
+    print(f"  Captcha answer: {captcha_val}")
+    cap_inp = driver.find_element(*CAPTCHA_INPUT)
+    cap_inp.clear()
+    cap_inp.send_keys(captcha_val)
+    time.sleep(0.2)
+
+
+def detect_result(driver, wait) -> tuple[str, str]:
+    """
+    Wait for booking result. Returns (status, message):
+      'success'           — booking confirmed
+      'already_booked'    — user already has an active appointment
+      'slot_gone'         — date no longer available
+      'error'             — other failure
+    """
+    try:
+        # Wait up to 10s for SweetAlert or page change
+        wait_short = WebDriverWait(driver, 10)
+        wait_short.until(lambda d:
+            d.find_elements(By.CSS_SELECTOR, ".swal2-popup") or
+            d.find_elements(By.CSS_SELECTOR, ".swal2-container") or
+            "success" in d.current_url.lower() or
+            "confirm" in d.current_url.lower()
+        )
+    except Exception:
+        pass
+
+    # Check SweetAlert
+    for sel in [".swal2-html-container", ".swal2-content", ".swal2-popup"]:
+        els = driver.find_elements(By.CSS_SELECTOR, sel)
+        if els:
+            text = els[0].text.strip().lower()
+            print(f"  Site response: {els[0].text.strip()[:200]}")
+            if any(w in text for w in ["success", "booked", "confirm", "appointment has been"]):
+                return "success", els[0].text.strip()
+            if any(w in text for w in ["already", "existing", "have an appointment", "active booking"]):
+                return "already_booked", els[0].text.strip()
+            if any(w in text for w in ["not available", "slot", "taken", "unavailable"]):
+                return "slot_gone", els[0].text.strip()
+            return "error", els[0].text.strip()
+
+    # Check URL
+    if any(w in driver.current_url.lower() for w in ["success", "confirm"]):
+        return "success", "Booking confirmed (URL redirect)"
+
+    return "error", f"Unknown result. URL: {driver.current_url}"
+
+
+def attempt_auto_book(driver, wait, target_date: datetime.date, display_str: str) -> str:
+    """
+    Try to book target_date. Returns outcome string.
+    Pre-condition: driver is on the /application page with OCI + Fresh OCI selected.
+    """
+    print(f"\n  AUTO-BOOKING: attempting to book {display_str}…")
+
+    # Step 1: Select the date in the datepicker
+    if not select_date_in_picker(driver, wait, target_date):
+        return "slot_gone"
+
+    # Verify the date got set
+    date_val = driver.find_element(*DATE_INPUT).get_attribute("value")
+    print(f"  Date field value: {date_val!r}")
+    if not date_val:
+        return "slot_gone"
+
+    # Step 2: Fill personal details + captcha
+    fill_form_fields(driver, wait)
+
+    # Step 3: Submit
+    print("  Clicking 'Book An Appointment'…")
+    try:
+        btn = wait.until(EC.element_to_be_clickable(BOOK_BUTTON))
+        btn.click()
+    except Exception as e:
+        print(f"  Could not click book button: {e}")
+        return "error"
+
+    # Step 4: Detect result
+    status, msg = detect_result(driver, wait)
+    print(f"  Booking result: {status} — {msg[:100]}")
+    return status
+
+
+# ── Main check ───────────────────────────────────────────────────────────────
+
 def run_check(visible: bool = False):
     print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Starting OCI slot check…")
+    if CUTOFF_DATE:
+        print(f"  Cutoff: {CUTOFF_DATE}  |  Cancel count: {CANCEL_COUNT}/2  |  "
+              f"Auto-book window: {AUTO_BOOK_DAYS} days")
+
     driver = build_driver(visible)
     wait   = WebDriverWait(driver, 20)
 
     try:
-        # ── Step 1: Homepage ────────────────────────────────────────────
+        # ── Navigate to /application ─────────────────────────────────────────
         driver.get(BASE_URL)
         wait.until(EC.presence_of_element_located(AGREE_CHECKBOX))
-        print("  Page 1 loaded — agreeing to terms and proceeding…")
+        print("  Page 1 — agreeing and proceeding…")
         agree_and_proceed(driver, wait)
 
-        # ── Step 2: Select Jurisdiction = Berlin ────────────────────────
         wait.until(EC.presence_of_element_located(JURISDICTION_SELECT))
-        print("  Page 2 loaded — selecting Berlin…")
+        print("  Page 2 — selecting Berlin…")
         Select(driver.find_element(*JURISDICTION_SELECT)).select_by_value(BERLIN_VALUE)
         time.sleep(0.5)
         agree_and_proceed(driver, wait)
 
-        # ── Step 3: Select OCI category ─────────────────────────────────
         wait.until(EC.presence_of_element_located(CATEGORY_SELECT))
-        print("  Page 3 (/application) loaded — selecting OCI Services…")
+        print("  Page 3 — selecting OCI Services…")
         Select(driver.find_element(*CATEGORY_SELECT)).select_by_value(OCI_CATEGORY_VALUE)
-
-        # Wait for the #service select to appear (loaded via AJAX/JS)
         wait.until(EC.presence_of_element_located(SERVICE_SELECT))
         time.sleep(0.5)
 
-        # ── Step 4: Select Fresh OCI ─────────────────────────────────────
         print("  Selecting Fresh OCI…")
-        svc_sel = driver.find_element(*SERVICE_SELECT)
-        Select(svc_sel).select_by_value(FRESH_OCI_VALUE)
+        Select(driver.find_element(*SERVICE_SELECT)).select_by_value(FRESH_OCI_VALUE)
         time.sleep(0.5)
 
-        # ── Step 5: Open date picker ─────────────────────────────────────
-        print("  Opening appointment date picker…")
+        # ── Open datepicker and scan months ──────────────────────────────────
+        print("  Opening datepicker…")
         date_inp = wait.until(EC.element_to_be_clickable(DATE_INPUT))
         date_inp.click()
-
-        # Wait for calendar to render
         wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
         time.sleep(0.5)
 
-        # ── Step 6: Scan calendar months ─────────────────────────────────
-        all_available: list[str] = []
+        all_available: list[tuple[str, datetime.date]] = []
 
         for month_idx in range(MONTHS_TO_CHECK):
-            label, avail, booked_cnt, total_cnt = summarise_month(driver)
+            label = get_month_label(driver)
 
-            # Stop if this entire month is on/after the cutoff date
             if CUTOFF_DATE:
                 try:
-                    month_start = datetime.datetime.strptime(
-                        f"{label} 1", "%B %Y %d"
-                    ).date()
+                    month_start = datetime.datetime.strptime(f"{label} 1", "%B %Y %d").date()
                     if month_start >= CUTOFF_DATE:
                         print(f"\n  Stopping at {label} — on/after cutoff {CUTOFF_DATE}")
                         break
                 except ValueError:
                     pass
 
-            print(f"\n  Month: {label}")
-            print(f"    Total working days: {total_cnt - booked_cnt} "
-                  f"(booked={booked_cnt}, total cells={total_cnt})")
+            slots = get_available_dates(driver, label)
+            booked_cnt = len(driver.find_elements(By.CSS_SELECTOR, BOOKED_CELLS))
+            total_cnt  = len(driver.find_elements(By.CSS_SELECTOR, ALL_CELLS))
 
-            if avail:
-                print(f"    AVAILABLE slots ({len(avail)}):")
-                for d in avail:
-                    print(f"      • {d}")
-                all_available.extend(avail)
+            print(f"\n  Month: {label}  (booked={booked_cnt}, total={total_cnt})")
+            if slots:
+                print(f"    AVAILABLE ({len(slots)}):")
+                for ds, dt in slots:
+                    tag = " ← AUTO-BOOK" if is_within_auto_book_window(dt) else ""
+                    print(f"      • {ds}{tag}")
+                all_available.extend(slots)
             else:
                 print("    No available slots.")
 
-            # Navigate to next month (unless it's the last iteration)
             if month_idx < MONTHS_TO_CHECK - 1:
                 try:
-                    next_btn = wait.until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, NEXT_MONTH_BTN))
-                    )
+                    next_btn = wait.until(EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, NEXT_MONTH_BTN)))
                     next_btn.click()
                     time.sleep(0.8)
                 except Exception:
-                    break  # no more months available
+                    break
 
-        # ── Summary ───────────────────────────────────────────────────────
+        # ── Decide: auto-book or notify ───────────────────────────────────────
         print(f"\n{'='*50}")
-        if all_available:
-            print(f"AVAILABLE OCI appointment dates found ({len(all_available)} total):")
-            for d in all_available:
-                print(f"  • {d}")
-            print(f"\nBook at: {BASE_URL}")
-            notify(all_available)
-        else:
+
+        if not all_available:
             cutoff_info = f" before {CUTOFF_DATE}" if CUTOFF_DATE else ""
-            print(f"No available OCI appointment slots found{cutoff_info}.")
+            print(f"No available OCI slots found{cutoff_info}.")
+            print(f"{'='*50}")
+            return []
+
+        # Separate into auto-book candidates and notify-only
+        to_book   = [(ds, dt) for ds, dt in all_available if is_within_auto_book_window(dt)]
+        to_notify = [(ds, dt) for ds, dt in all_available if not is_within_auto_book_window(dt)]
+
+        print(f"Slots found — {len(to_book)} within {AUTO_BOOK_DAYS} days, "
+              f"{len(to_notify)} beyond.")
+
+        booking_outcome = None
+
+        if to_book:
+            # Pick earliest
+            to_book.sort(key=lambda x: x[1])
+            best_display, best_date = to_book[0]
+
+            if CANCEL_COUNT >= 2:
+                print(f"\n  CANCEL_COUNT={CANCEL_COUNT} — skipping auto-book to protect passport.")
+                msg = (f"Fresh OCI slot within {AUTO_BOOK_DAYS} days: {best_display}\n\n"
+                       f"⚠️ Auto-book SKIPPED — cancellation limit reached (2/2).\n"
+                       f"Book manually: {BASE_URL}")
+                notify(f"OCI Slot Available — Manual Action Needed!", msg)
+                booking_outcome = "limit_reached"
+            else:
+                # Close the datepicker first (press Escape) before filling form
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                time.sleep(0.3)
+
+                outcome = attempt_auto_book(driver, wait, best_date, best_display)
+                booking_outcome = outcome
+
+                if outcome == "success":
+                    msg = (f"✅ Booked {best_display}!\n\n"
+                           f"Earlier than your previous appointment on {CUTOFF_DATE}.\n"
+                           f"Check your email for confirmation.\n\n"
+                           f"Remember to cancel your old appointment and update "
+                           f"CUTOFF_DATE + CANCEL_COUNT in GitHub.")
+                    notify("OCI Appointment Booked!", msg)
+
+                elif outcome == "already_booked":
+                    msg = (f"Slot {best_display} is available — within {AUTO_BOOK_DAYS} days!\n\n"
+                           f"⚠️ Could not auto-book: you already have an active appointment.\n\n"
+                           f"1. Cancel your current appointment manually\n"
+                           f"2. Increment CANCEL_COUNT in GitHub Variables\n"
+                           f"3. The next run will auto-book this slot (if still available)\n\n"
+                           f"Book manually: {BASE_URL}")
+                    notify("OCI Slot Found — Cancel Your Current Appointment!", msg, priority="urgent")
+
+                elif outcome == "slot_gone":
+                    msg = (f"Slot {best_display} was detected but was taken before booking completed.\n\n"
+                           f"Continuing to monitor…")
+                    notify("OCI Slot Taken Before Booking", msg, priority="default")
+
+                else:  # error
+                    msg = f"Slot {best_display} found but booking failed with an error. Check GitHub Actions logs."
+                    notify("OCI Auto-Book Failed — Check Logs", msg)
+
+        # Send notification for slots outside auto-book window
+        if to_notify:
+            dates_str = "\n".join(f"• {ds}" for ds, _ in to_notify)
+            cutoff_line = f"Earlier than your appointment on {CUTOFF_DATE}\n\n" if CUTOFF_DATE else ""
+            msg = (f"Fresh OCI slots open in Berlin!\n\n"
+                   f"{cutoff_line}"
+                   f"These are outside the {AUTO_BOOK_DAYS}-day auto-book window:\n"
+                   f"{dates_str}\n\n"
+                   f"Book at: {BASE_URL}")
+            notify(f"OCI Slot Available! ({len(to_notify)} date(s))", msg)
+
         print(f"{'='*50}")
 
         if visible:
-            print("\nBrowser stays open for 30s — inspect the page manually…")
+            print("\nBrowser stays open 30s…")
             time.sleep(30)
 
-        return all_available  # non-empty = slots found
+        return all_available
 
     except Exception as e:
         print(f"\nERROR: {e}")
         import traceback
         traceback.print_exc()
-        return None  # signals an error
+        return None
     finally:
         driver.quit()
 
@@ -305,8 +522,8 @@ if __name__ == "__main__":
     visible = "--visible" in sys.argv
     result = run_check(visible=visible)
     if result is None:
-        sys.exit(2)   # error
+        sys.exit(2)
     elif result:
-        sys.exit(1)   # slots found — lets GitHub Actions detect and notify
+        sys.exit(1)
     else:
-        sys.exit(0)   # no slots, all good
+        sys.exit(0)
