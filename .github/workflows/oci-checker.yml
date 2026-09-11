@@ -37,6 +37,7 @@ jobs:
           MOBILE_NUMBER:     ${{ secrets.MOBILE_NUMBER }}
           EMAIL:             ${{ secrets.EMAIL }}
           NATIONALITY_VALUE: ${{ secrets.NATIONALITY_VALUE }}
+          ADDRESS:           ${{ secrets.ADDRESS }}
         run: |
           python3 oci_checker.py
           EXIT=$?

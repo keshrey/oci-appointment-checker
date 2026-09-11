@@ -54,6 +54,8 @@ NEXT_MONTH_BTN      = "#ui-datepicker-div .ui-datepicker-next"
 BOOK_BUTTON         = (By.ID, "btnSubmitReq")
 CAPTCHA_ANSWER      = (By.ID, "txtCaptcha")
 CAPTCHA_INPUT       = (By.ID, "CaptchaInput")
+TIME_SLOT_RADIOS    = "input[name='appmnt_time'][type='radio']"
+ADDRESS_FIELD       = (By.ID, "address")
 # ─────────────────────────────────────────────────────────────────────────────
 
 MONTHS_TO_CHECK   = 5
@@ -84,6 +86,7 @@ PERSONAL = {
     "mobile":       os.environ.get("MOBILE_NUMBER", ""),
     "email":        os.environ.get("EMAIL", ""),
     "nationality":  os.environ.get("NATIONALITY_VALUE", ""),
+    "address":      os.environ.get("ADDRESS", ""),
 }
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -183,6 +186,26 @@ def notify(title: str, message: str, priority: str = "urgent"):
 
 # ── Auto-booking ─────────────────────────────────────────────────────────────
 
+def select_first_time_slot(driver, wait) -> bool:
+    """Click the first available time-slot radio button after a date is selected."""
+    try:
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_elements(By.CSS_SELECTOR, TIME_SLOT_RADIOS)
+        )
+        radios = driver.find_elements(By.CSS_SELECTOR, TIME_SLOT_RADIOS)
+        if radios:
+            driver.execute_script("arguments[0].click();", radios[0])
+            label = radios[0].find_elements(By.XPATH, "following-sibling::label")
+            slot_text = label[0].text.strip() if label else radios[0].get_attribute("value")
+            print(f"  Time slot selected: {slot_text}")
+            time.sleep(0.3)
+            return True
+    except Exception:
+        pass
+    print("  No time slot radios found (may not have appeared yet)")
+    return False
+
+
 def navigate_datepicker_to_month(driver, wait, target_date: datetime.date) -> bool:
     """Navigate the open datepicker to the month containing target_date."""
     for _ in range(12):
@@ -220,7 +243,8 @@ def select_date_in_picker(driver, wait, target_date: datetime.date) -> bool:
     for cell in driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS):
         if cell.text.strip() == day_str:
             cell.click()
-            time.sleep(0.5)
+            time.sleep(0.8)
+            select_first_time_slot(driver, wait)
             return True
 
     print(f"  Day {day_str} not found / no longer available in datepicker")
@@ -243,13 +267,15 @@ def fill_form_fields(driver, wait):
     set_field("secondname",      PERSONAL["last_name"])
     set_field("mobile_number",   PERSONAL["mobile"])
     set_field("email",           PERSONAL["email"])
+    set_field("address",         PERSONAL["address"])
 
     # DOB — jQuery datepicker field; set via JS then trigger change
     if PERSONAL["dob"]:
         driver.execute_script(
             "var el = document.getElementById('date_of_birth');"
             "el.value = arguments[0];"
-            "$(el).trigger('change');",
+            "if(typeof jQuery !== 'undefined') jQuery(el).trigger('change');"
+            "else el.dispatchEvent(new Event('change', {bubbles:true}));",
             PERSONAL["dob"]
         )
         time.sleep(0.2)
