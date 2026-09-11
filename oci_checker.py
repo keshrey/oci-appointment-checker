@@ -141,7 +141,9 @@ def build_driver(visible: bool) -> webdriver.Chrome:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     svc = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=svc, options=opts)
+    driver = webdriver.Chrome(service=svc, options=opts)
+    driver.set_page_load_timeout(60)
+    return driver
 
 
 def agree_and_proceed(driver, wait):
@@ -581,11 +583,20 @@ def run_check(visible: bool = False):
         print(f"\nERROR: {e}")
         import traceback
         traceback.print_exc()
-        screenshot(driver, "error_state")
+        try:
+            screenshot(driver, "error_state")
+        except Exception:
+            pass
         return None
     finally:
-        stitch_screenshots()
-        driver.quit()
+        try:
+            stitch_screenshots()
+        except Exception:
+            pass
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
