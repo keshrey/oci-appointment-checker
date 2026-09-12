@@ -165,6 +165,99 @@ def agree_and_proceed(driver, wait):
     time.sleep(2)
 
 
+def get_google_access_token() -> str | None:
+    """Exchange stored refresh token for a short-lived access token."""
+    client_id     = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+    try:
+        import json
+        data = urllib.parse.urlencode({
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type":    "refresh_token",
+        }).encode()
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=data, method="POST")
+        resp = urllib.request.urlopen(req, timeout=10)
+        return json.loads(resp.read())["access_token"]
+    except Exception as e:
+        print(f"  Calendar auth failed: {e}")
+        return None
+
+
+def get_calendar_events_for_date(access_token: str, date: datetime.date) -> list:
+    """Fetch primary calendar events for a given date (Berlin timezone)."""
+    try:
+        import json
+        # Berlin is UTC+2 in summer, UTC+1 in winter; use fixed +02:00 as embassy is summer/autumn
+        offset = "+02:00" if date.month in range(3, 11) else "+01:00"
+        params = urllib.parse.urlencode({
+            "timeMin":      f"{date.isoformat()}T00:00:00{offset}",
+            "timeMax":      f"{date.isoformat()}T23:59:59{offset}",
+            "timeZone":     "Europe/Berlin",
+            "singleEvents": "true",
+            "orderBy":      "startTime",
+        })
+        req = urllib.request.Request(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{params}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        return json.loads(resp.read()).get("items", [])
+    except Exception as e:
+        print(f"  Could not fetch calendar events for {date}: {e}")
+        return []
+
+
+def has_morning_conflict(events: list, date: datetime.date) -> bool:
+    """Return True if any event overlaps the embassy window (08:00–14:00 Berlin)."""
+    offset = datetime.timedelta(hours=2 if date.month in range(3, 11) else 1)
+    tz = datetime.timezone(offset)
+    window_start = datetime.datetime(date.year, date.month, date.day, 8,  0, tzinfo=tz)
+    window_end   = datetime.datetime(date.year, date.month, date.day, 14, 0, tzinfo=tz)
+    for ev in events:
+        ev_start = ev.get("start", {}).get("dateTime")
+        ev_end   = ev.get("end",   {}).get("dateTime")
+        if not ev_start or not ev_end:
+            continue  # skip all-day events
+        try:
+            s = datetime.datetime.fromisoformat(ev_start)
+            e = datetime.datetime.fromisoformat(ev_end)
+            if s < window_end and e > window_start:
+                print(f"    Calendar conflict: '{ev.get('summary', 'event')}' ({ev_start})")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def pick_best_slot(slots: list[tuple[str, datetime.date]]) -> tuple[str, datetime.date]:
+    """
+    Pick the earliest slot with no calendar conflict.
+    Falls back to the earliest slot if all conflict or calendar is unavailable.
+    """
+    slots_sorted = sorted(slots, key=lambda x: x[1])
+    access_token = get_google_access_token()
+    if not access_token:
+        print("  No Google Calendar credentials — picking earliest slot.")
+        return slots_sorted[0]
+
+    print("  Checking Google Calendar for conflicts…")
+    for display, date in slots_sorted:
+        events = get_calendar_events_for_date(access_token, date)
+        if not has_morning_conflict(events, date):
+            print(f"  No conflict on {display} — selected.")
+            return display, date
+        print(f"  {display} conflicts with an existing event.")
+
+    print(f"  All slots conflict — booking earliest anyway: {slots_sorted[0][0]}")
+    return slots_sorted[0]
+
+
 def get_month_label(driver) -> str:
     try:
         m_sel = driver.find_elements(By.CSS_SELECTOR,
@@ -520,9 +613,7 @@ def run_check(visible: bool = False):
         booking_outcome = None
 
         if to_book:
-            # Pick earliest
-            to_book.sort(key=lambda x: x[1])
-            best_display, best_date = to_book[0]
+            best_display, best_date = pick_best_slot(to_book)
 
             if CANCEL_COUNT >= 2:
                 print(f"\n  CANCEL_COUNT={CANCEL_COUNT} — skipping auto-book to protect passport.")
