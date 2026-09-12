@@ -94,10 +94,16 @@ PERSONAL = {
 
 SCREENSHOT_DIR = pathlib.Path("/tmp/oci_screenshots")
 _shot_index = 0
+_dir_initialized = False
 
 def screenshot(driver, label: str):
-    global _shot_index
-    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    global _shot_index, _dir_initialized
+    if not _dir_initialized:
+        import shutil
+        if SCREENSHOT_DIR.exists():
+            shutil.rmtree(SCREENSHOT_DIR)
+        SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        _dir_initialized = True
     path = SCREENSHOT_DIR / f"{_shot_index:02d}_{label}.png"
     driver.save_screenshot(str(path))
     _shot_index += 1
