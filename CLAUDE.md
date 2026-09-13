@@ -4,7 +4,7 @@
 
 Automated slot checker and auto-booker for OCI (Overseas Citizen of India) appointments at the Indian Embassy Berlin (`appointment.indianembassyberlin.gov.in`).
 
-- Runs every 5 minutes via cron-job.org → GitHub Actions `workflow_dispatch`
+- Runs every 2 minutes via cron-job.org → GitHub Actions `workflow_dispatch`
 - Scans the appointment calendar for available slots
 - Auto-books the earliest slot if it falls within 30 days of today
 - Sends push notifications via ntfy.sh for all findings
@@ -87,7 +87,7 @@ BOOKED_CELLS     = "#ui-datepicker-div td.booked-dates"
 ## Trigger Setup
 
 - **GitHub Actions schedule**: removed — do NOT add a `schedule:` trigger back
-- **Trigger**: cron-job.org calls GitHub API every 5 minutes to fire `workflow_dispatch`
+- **Trigger**: cron-job.org calls GitHub API every 2 minutes to fire `workflow_dispatch`
 - Workflow only has `on: workflow_dispatch`
 
 ## Notifications (ntfy.sh)
