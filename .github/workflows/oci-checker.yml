@@ -36,6 +36,8 @@ jobs:
           EMAIL:             ${{ secrets.EMAIL }}
           NATIONALITY_VALUE: ${{ secrets.NATIONALITY_VALUE }}
           ADDRESS:           ${{ secrets.ADDRESS }}
+          GH_RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_RUN_NUMBER:     ${{ github.run_number }}
         run: |
           python3 oci_checker.py
           EXIT=$?

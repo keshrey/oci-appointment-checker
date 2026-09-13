@@ -157,12 +157,10 @@ def agree_and_proceed(driver, wait):
         chk = wait.until(EC.presence_of_element_located(AGREE_CHECKBOX))
         if not chk.is_selected():
             chk.click()
-        time.sleep(0.3)
     except Exception:
         pass
     btn = wait.until(EC.element_to_be_clickable(PROCEED_BUTTON))
     btn.click()
-    time.sleep(2)
 
 
 def get_month_label(driver) -> str:
@@ -212,14 +210,26 @@ def is_within_auto_book_window(slot_date: datetime.date) -> bool:
     return slot_date <= datetime.date.today() + datetime.timedelta(days=AUTO_BOOK_DAYS)
 
 
+GH_RUN_URL = os.environ.get("GH_RUN_URL", "").strip()
+GH_RUN_NUM = os.environ.get("GH_RUN_NUMBER", "").strip()
+
+
+def _run_footer() -> str:
+    if GH_RUN_URL:
+        label = f"Run #{GH_RUN_NUM}" if GH_RUN_NUM else "Actions run"
+        return f"\n\n🔗 {label}: {GH_RUN_URL}"
+    return ""
+
+
 def notify(title: str, message: str, priority: str = "urgent"):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic:
         return
     try:
+        full_message = message + _run_footer()
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
-            data=message.encode("utf-8"),
+            data=full_message.encode("utf-8"),
             headers={"Title": title, "Priority": priority, "Tags": "tada,calendar"},
             method="POST",
         )
@@ -243,7 +253,6 @@ def select_first_time_slot(driver, wait) -> bool:
             label = radios[0].find_elements(By.XPATH, "following-sibling::label")
             slot_text = label[0].text.strip() if label else radios[0].get_attribute("value")
             print(f"  Time slot selected: {slot_text}")
-            time.sleep(0.3)
             return True
     except Exception:
         pass
@@ -267,7 +276,7 @@ def navigate_datepicker_to_month(driver, wait, target_date: datetime.date) -> bo
             next_btn = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, NEXT_MONTH_BTN)))
             next_btn.click()
-            time.sleep(0.5)
+            WebDriverWait(driver, 5).until(lambda d: get_month_label(d) != label)
         except Exception:
             return False
     return False
@@ -278,7 +287,6 @@ def select_date_in_picker(driver, wait, target_date: datetime.date) -> bool:
     date_inp = wait.until(EC.element_to_be_clickable(DATE_INPUT))
     date_inp.click()
     wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
-    time.sleep(0.5)
 
     if not navigate_datepicker_to_month(driver, wait, target_date):
         print(f"  Could not navigate datepicker to {target_date}")
@@ -288,7 +296,6 @@ def select_date_in_picker(driver, wait, target_date: datetime.date) -> bool:
     for cell in driver.find_elements(By.CSS_SELECTOR, AVAILABLE_CELLS):
         if cell.text.strip() == day_str:
             cell.click()
-            time.sleep(0.8)
             select_first_time_slot(driver, wait)
             return True
 
@@ -304,7 +311,6 @@ def fill_form_fields(driver, wait):
         el = driver.find_element(By.ID, field_id)
         el.clear()
         el.send_keys(value)
-        time.sleep(0.1)
 
     set_field("app_ref_no",     PERSONAL["app_ref_no"])
     set_field("passport_number", PERSONAL["passport"])
@@ -323,14 +329,12 @@ def fill_form_fields(driver, wait):
             "else el.dispatchEvent(new Event('change', {bubbles:true}));",
             PERSONAL["dob"]
         )
-        time.sleep(0.2)
 
     # Nationality
     if PERSONAL["nationality"]:
         try:
             Select(driver.find_element(*NATIONALITY_SELECT)).select_by_value(
                 PERSONAL["nationality"])
-            time.sleep(0.3)
         except Exception as e:
             print(f"  Warning: could not set nationality: {e}")
 
@@ -340,7 +344,6 @@ def fill_form_fields(driver, wait):
     cap_inp = driver.find_element(*CAPTCHA_INPUT)
     cap_inp.clear()
     cap_inp.send_keys(captcha_val)
-    time.sleep(0.2)
 
 
 def detect_result(driver, wait) -> tuple[str, str]:
@@ -442,18 +445,15 @@ def run_check(visible: bool = False):
         print("  Page 2 — selecting Berlin…")
         screenshot(driver, "page2_jurisdiction")
         Select(driver.find_element(*JURISDICTION_SELECT)).select_by_value(BERLIN_VALUE)
-        time.sleep(0.5)
         agree_and_proceed(driver, wait)
 
         wait.until(EC.presence_of_element_located(CATEGORY_SELECT))
         print("  Page 3 — selecting OCI Services…")
         Select(driver.find_element(*CATEGORY_SELECT)).select_by_value(OCI_CATEGORY_VALUE)
         wait.until(EC.presence_of_element_located(SERVICE_SELECT))
-        time.sleep(0.5)
 
         print("  Selecting Fresh OCI…")
         Select(driver.find_element(*SERVICE_SELECT)).select_by_value(FRESH_OCI_VALUE)
-        time.sleep(0.5)
         screenshot(driver, "page3_service_selected")
 
         # ── Open datepicker and scan months ──────────────────────────────────
@@ -461,7 +461,6 @@ def run_check(visible: bool = False):
         date_inp = wait.until(EC.element_to_be_clickable(DATE_INPUT))
         date_inp.click()
         wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
-        time.sleep(0.5)
 
         all_available: list[tuple[str, datetime.date]] = []
 
@@ -496,8 +495,10 @@ def run_check(visible: bool = False):
                 try:
                     next_btn = wait.until(EC.element_to_be_clickable(
                         (By.CSS_SELECTOR, NEXT_MONTH_BTN)))
+                    prev_label = label
                     next_btn.click()
-                    time.sleep(0.8)
+                    WebDriverWait(driver, 5).until(
+                        lambda d: get_month_label(d) != prev_label)
                 except Exception:
                     break
 
@@ -534,7 +535,11 @@ def run_check(visible: bool = False):
             else:
                 # Close the datepicker first (press Escape) before filling form
                 driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-                time.sleep(0.3)
+                try:
+                    WebDriverWait(driver, 3).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
+                except Exception:
+                    pass
 
                 outcome = attempt_auto_book(driver, wait, best_date, best_display)
                 screenshot(driver, "after_booking_attempt")
