@@ -463,6 +463,7 @@ def run_check(visible: bool = False):
         wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
 
         all_available: list[tuple[str, datetime.date]] = []
+        found_bookable = False
 
         for month_idx in range(MONTHS_TO_CHECK):
             label = get_month_label(driver)
@@ -477,17 +478,19 @@ def run_check(visible: bool = False):
                     pass
 
             slots = get_available_dates(driver, label)
-            booked_cnt = len(driver.find_elements(By.CSS_SELECTOR, BOOKED_CELLS))
-            total_cnt  = len(driver.find_elements(By.CSS_SELECTOR, ALL_CELLS))
-
-            print(f"\n  Month: {label}  (booked={booked_cnt}, total={total_cnt})")
+            print(f"\n  Month: {label}")
             screenshot(driver, f"calendar_{label.replace(' ', '_')}")
             if slots:
                 print(f"    AVAILABLE ({len(slots)}):")
                 for ds, dt in slots:
-                    tag = " ← AUTO-BOOK" if is_within_auto_book_window(dt) else ""
+                    tag = " ← BOOKING NOW" if is_within_auto_book_window(dt) else ""
                     print(f"      • {ds}{tag}")
                 all_available.extend(slots)
+                # Stop scanning immediately if we have a bookable slot — every
+                # second counts when a slot could be taken by someone else.
+                if any(is_within_auto_book_window(dt) for _, dt in slots):
+                    found_bookable = True
+                    break
             else:
                 print("    No available slots.")
 
