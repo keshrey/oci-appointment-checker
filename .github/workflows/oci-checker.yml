@@ -27,6 +27,7 @@ jobs:
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           CUTOFF_DATE:       ${{ vars.CUTOFF_DATE }}
           CANCEL_COUNT:      ${{ vars.CANCEL_COUNT }}
+          AUTO_BOOK_DAYS:    ${{ vars.AUTO_BOOK_DAYS }}
           APP_REF_NO:        ${{ secrets.APP_REF_NO }}
           PASSPORT_NUMBER:   ${{ secrets.PASSPORT_NUMBER }}
           FIRST_NAME:        ${{ secrets.FIRST_NAME }}

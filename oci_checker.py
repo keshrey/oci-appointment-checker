@@ -60,7 +60,10 @@ ADDRESS_FIELD       = (By.ID, "address")
 # ─────────────────────────────────────────────────────────────────────────────
 
 MONTHS_TO_CHECK   = 5
-AUTO_BOOK_DAYS    = 30   # auto-book if slot is within this many days from today
+try:
+    AUTO_BOOK_DAYS = int(os.environ.get("AUTO_BOOK_DAYS", "30"))
+except ValueError:
+    AUTO_BOOK_DAYS = 30
 
 MONTH_NAMES = ["January","February","March","April","May","June",
                "July","August","September","October","November","December"]
