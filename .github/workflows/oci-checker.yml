@@ -40,6 +40,7 @@ jobs:
           GH_RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_RUN_NUMBER:     ${{ github.run_number }}
         run: |
+          set +e
           python3 oci_checker.py
           EXIT=$?
           echo "exit_code=$EXIT" >> $GITHUB_OUTPUT

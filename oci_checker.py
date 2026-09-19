@@ -387,6 +387,18 @@ def detect_result(driver, wait) -> tuple[str, str]:
     if any(w in driver.current_url.lower() for w in ["success", "confirm"]):
         return "success", "Booking confirmed (URL redirect)"
 
+    # Fallback: scan page body for keywords
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+        if any(w in body for w in ["appointment has been booked", "booking confirmed", "successfully booked"]):
+            return "success", "Booking confirmed (page text)"
+        if any(w in body for w in ["already have", "existing appointment", "active booking"]):
+            return "already_booked", "Already has appointment (page text)"
+        if any(w in body for w in ["not available", "slot not", "date not"]):
+            return "slot_gone", "Slot unavailable (page text)"
+    except Exception:
+        pass
+
     return "error", f"Unknown result. URL: {driver.current_url}"
 
 
@@ -536,7 +548,7 @@ def run_check(visible: bool = False):
                 msg = (f"Fresh OCI slot within {AUTO_BOOK_DAYS} days: {best_display}\n\n"
                        f"⚠️ Auto-book SKIPPED — cancellation limit reached (2/2).\n"
                        f"Book manually: {BASE_URL}")
-                notify(f"OCI Slot Available — Manual Action Needed!", msg)
+                notify("OCI Slot Available - Manual Action Needed!", msg)
                 booking_outcome = "limit_reached"
             else:
                 # Close the datepicker first (press Escape) before filling form
@@ -566,7 +578,7 @@ def run_check(visible: bool = False):
                            f"2. Increment CANCEL_COUNT in GitHub Variables\n"
                            f"3. The next run will auto-book this slot (if still available)\n\n"
                            f"Book manually: {BASE_URL}")
-                    notify("OCI Slot Found — Cancel Your Current Appointment!", msg, priority="urgent")
+                    notify("OCI Slot Found - Cancel Your Current Appointment!", msg, priority="urgent")
 
                 elif outcome == "slot_gone":
                     msg = (f"Slot {best_display} was detected but was taken before booking completed.\n\n"
@@ -575,7 +587,7 @@ def run_check(visible: bool = False):
 
                 else:  # error
                     msg = f"Slot {best_display} found but booking failed with an error. Check GitHub Actions logs."
-                    notify("OCI Auto-Book Failed — Check Logs", msg)
+                    notify("OCI Auto-Book Failed - Check Logs", msg)
 
         # Send notification for slots outside auto-book window
         if to_notify:
