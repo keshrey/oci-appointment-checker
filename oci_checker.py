@@ -65,6 +65,8 @@ try:
 except ValueError:
     AUTO_BOOK_DAYS = 30
 
+AUTO_BOOK_ENABLED = os.environ.get("AUTO_BOOK_ENABLED", "true").strip().lower() != "false"
+
 MONTH_NAMES = ["January","February","March","April","May","June",
                "July","August","September","October","November","December"]
 
@@ -149,6 +151,7 @@ def build_driver(visible: bool) -> webdriver.Chrome:
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.set_capability("goog:loggingPrefs", {"browser": "ALL", "performance": "ALL"})
     svc = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=svc, options=opts)
     driver.set_page_load_timeout(60)
@@ -285,6 +288,43 @@ def navigate_datepicker_to_month(driver, wait, target_date: datetime.date) -> bo
     return False
 
 
+def select_dob_via_picker(driver, wait, dob_str: str) -> bool:
+    """Select DOB via datepicker. dob_str is in DD/MM/YYYY format as shown on the site."""
+    try:
+        parts = dob_str.split("/")
+        day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+    except (ValueError, IndexError):
+        print(f"  Warning: cannot parse DOB '{dob_str}'")
+        return False
+
+    dob_inp = wait.until(EC.element_to_be_clickable((By.ID, "date_of_birth")))
+    dob_inp.click()
+    wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, CALENDAR_DIV)))
+
+    # Use month/year dropdowns if present (faster than clicking next)
+    m_sels = driver.find_elements(By.CSS_SELECTOR, "#ui-datepicker-div select.ui-datepicker-month")
+    y_sels = driver.find_elements(By.CSS_SELECTOR, "#ui-datepicker-div select.ui-datepicker-year")
+    if m_sels and y_sels:
+        Select(m_sels[0]).select_by_value(str(month - 1))  # jQuery UI months are 0-indexed
+        Select(y_sels[0]).select_by_value(str(year))
+        WebDriverWait(driver, 3).until(
+            lambda d: get_month_label(d) == f"{MONTH_NAMES[month - 1]} {year}")
+    else:
+        target = datetime.date(year, month, day)
+        if not navigate_datepicker_to_month(driver, wait, target):
+            return False
+
+    for cell in driver.find_elements(By.CSS_SELECTOR,
+                                     "#ui-datepicker-div td:not(.ui-datepicker-other-month) a"):
+        if cell.text.strip() == str(day):
+            cell.click()
+            print(f"  DOB selected via datepicker: {dob_str}")
+            return True
+
+    print(f"  Warning: could not find day {day} in DOB datepicker")
+    return False
+
+
 def select_date_in_picker(driver, wait, target_date: datetime.date) -> bool:
     """Open datepicker, navigate to month, click the day. Returns True on success."""
     date_inp = wait.until(EC.element_to_be_clickable(DATE_INPUT))
@@ -358,8 +398,8 @@ def detect_result(driver, wait) -> tuple[str, str]:
       'error'             — other failure
     """
     try:
-        # Wait up to 10s for SweetAlert or page change
-        wait_short = WebDriverWait(driver, 10)
+        # Wait up to 15s for SweetAlert or page change
+        wait_short = WebDriverWait(driver, 15)
         wait_short.until(lambda d:
             d.find_elements(By.CSS_SELECTOR, ".swal2-popup") or
             d.find_elements(By.CSS_SELECTOR, ".swal2-container") or
@@ -406,10 +446,55 @@ def attempt_auto_book(driver, wait, target_date: datetime.date, display_str: str
     """
     Try to book target_date. Returns outcome string.
     Pre-condition: driver is on the /application page with OCI + Fresh OCI selected.
+    Fill order matches what the site expects: reference no first → personal fields →
+    date/time → captcha → submit.
     """
     print(f"\n  AUTO-BOOKING: attempting to book {display_str}…")
 
-    # Step 1: Select the date in the datepicker
+    # Step 1: Fill reference number first and wait for backend check
+    if PERSONAL["app_ref_no"]:
+        el = driver.find_element(By.ID, "app_ref_no")
+        el.clear()
+        el.send_keys(PERSONAL["app_ref_no"])
+        # Wait for /check-app-ref AJAX to complete (up to 5s)
+        try:
+            WebDriverWait(driver, 5).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, ".swal2-popup")) > 0
+                or d.find_element(By.ID, "app_ref_no").get_attribute("value") == PERSONAL["app_ref_no"]
+            )
+        except Exception:
+            pass
+        time.sleep(1)  # let check-app-ref AJAX settle before filling other fields
+
+    # Step 2: Fill remaining personal fields (except captcha)
+    def set_field(field_id, value):
+        if not value:
+            return
+        try:
+            el = driver.find_element(By.ID, field_id)
+            el.clear()
+            el.send_keys(value)
+        except Exception as e:
+            print(f"  Warning: could not set {field_id}: {e}")
+
+    set_field("passport_number", PERSONAL["passport"])
+    set_field("firstname",       PERSONAL["first_name"])
+    set_field("secondname",      PERSONAL["last_name"])
+    set_field("mobile_number",   PERSONAL["mobile"])
+    set_field("email",           PERSONAL["email"])
+    set_field("address",         PERSONAL["address"])
+
+    if PERSONAL["dob"]:
+        select_dob_via_picker(driver, wait, PERSONAL["dob"])
+
+    if PERSONAL["nationality"]:
+        try:
+            Select(driver.find_element(*NATIONALITY_SELECT)).select_by_value(
+                PERSONAL["nationality"])
+        except Exception as e:
+            print(f"  Warning: could not set nationality: {e}")
+
+    # Step 3: Select the date in the datepicker
     if not select_date_in_picker(driver, wait, target_date):
         return "slot_gone"
 
@@ -419,10 +504,15 @@ def attempt_auto_book(driver, wait, target_date: datetime.date, display_str: str
     if not date_val:
         return "slot_gone"
 
-    # Step 2: Fill personal details + captcha
-    fill_form_fields(driver, wait)
+    # Step 4: Fill captcha
+    captcha_val = driver.find_element(*CAPTCHA_ANSWER).get_attribute("value")
+    print(f"  Captcha answer: {captcha_val}")
+    cap_inp = driver.find_element(*CAPTCHA_INPUT)
+    cap_inp.clear()
+    cap_inp.send_keys(captcha_val)
 
-    # Step 3: Submit
+    # Step 5: Submit
+    screenshot(driver, "before_booking_submit")
     print("  Clicking 'Book An Appointment'…")
     try:
         btn = wait.until(EC.element_to_be_clickable(BOOK_BUTTON))
@@ -431,9 +521,27 @@ def attempt_auto_book(driver, wait, target_date: datetime.date, display_str: str
         print(f"  Could not click book button: {e}")
         return "error"
 
-    # Step 4: Detect result
+    # Step 6: Detect result
     status, msg = detect_result(driver, wait)
     print(f"  Booking result: {status} — {msg[:100]}")
+
+    # Dump console errors and network responses for debugging
+    try:
+        import json
+        for log in driver.get_log("browser"):
+            if log.get("level") in ("SEVERE", "WARNING"):
+                print(f"  [console {log['level']}] {log['message']}")
+        for log in driver.get_log("performance"):
+            event = json.loads(log["message"]).get("message", {})
+            if event.get("method") == "Network.responseReceived":
+                resp = event.get("params", {}).get("response", {})
+                url = resp.get("url", "")
+                status_code = resp.get("status", "")
+                if "appointment" in url.lower() or "application" in url.lower():
+                    print(f"  [network] {status_code} {url}")
+    except Exception as e:
+        print(f"  [debug log error] {e}")
+
     return status
 
 
@@ -543,7 +651,15 @@ def run_check(visible: bool = False):
             to_book.sort(key=lambda x: x[1])
             best_display, best_date = to_book[0]
 
-            if CANCEL_COUNT >= 2:
+            if not AUTO_BOOK_ENABLED:
+                print(f"\n  AUTO_BOOK_ENABLED=false — skipping auto-book.")
+                dates_str = "\n".join(f"• {ds}" for ds, _ in to_book)
+                msg = (f"Fresh OCI slots open in Berlin — earlier than your appointment!\n\n"
+                       f"{dates_str}\n\n"
+                       f"Auto-book is disabled. Book manually: {BASE_URL}")
+                notify("OCI Slot Available - Book Manually!", msg)
+                booking_outcome = "disabled"
+            elif CANCEL_COUNT >= 2:
                 print(f"\n  CANCEL_COUNT={CANCEL_COUNT} — skipping auto-book to protect passport.")
                 msg = (f"Fresh OCI slot within {AUTO_BOOK_DAYS} days: {best_display}\n\n"
                        f"⚠️ Auto-book SKIPPED — cancellation limit reached (2/2).\n"
